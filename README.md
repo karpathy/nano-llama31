@@ -43,6 +43,7 @@ And now let's pop up to the root of the repo and run the generation script, whic
 
 ```bash
 cd ../
+pip install fire
 torchrun --nnodes 1 --nproc_per_node 1 reference.py \
     --ckpt_dir llama-models/models/llama3_1/Meta-Llama-3.1-8B \
     --tokenizer_path llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model

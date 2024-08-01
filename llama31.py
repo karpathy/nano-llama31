@@ -646,7 +646,6 @@ def reference(
         cheese =>""",
     ]
 
-    gen = True
     t0 = time.time()
     results = llama.text_completion(
         prompts,
