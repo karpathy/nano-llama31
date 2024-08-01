@@ -142,6 +142,12 @@ Translate English to French:
 
 I suspect this is because of PyTorch global use of random seed, and PyTorch layers like nn.Embedding and nn.Linear consume entropy from the (global) rng. While the reference code uses `init_method` of `lambda x: x`, i.e. a noop, not initializing, and therefore not consuming entropy. TODO chase down later.
 
+### finetuning
+
+Early draft of finetuning exists on Tiny Stories dataset, requires hacking the code to call `finetune` instead of `reference`. Requires quite a bit of VRAM atm, e.g. only training the RMSNorm still takes up a good chunk of my 80GB GPU.
+
+### todos
+
 TODOs:
 
 - get reference.py and llama31.py outputs to match exactly

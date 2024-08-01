@@ -98,9 +98,7 @@ def apply_scaling(freqs: torch.Tensor):
     return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
 
 
-def precompute_freqs_cis(
-    dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False
-):
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
     if use_scaled:
@@ -169,27 +167,32 @@ class Attention(nn.Module):
         mask: Optional[torch.Tensor],
     ):
         bsz, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
+        # QKV
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-
+        # rotate QK (rope)
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        # kv-caching (which we can disable by setting start_pos = -1)
+        if start_pos >= 0:
+            self.cache_k = self.cache_k.to(xq)
+            self.cache_v = self.cache_v.to(xq)
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+            keys = self.cache_k[:bsz, : start_pos + seqlen]
+            values = self.cache_v[:bsz, : start_pos + seqlen]
+        else:
+            keys = xk
+            values = xv
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
-
-        # repeat k/v heads if n_kv_heads < n_heads
+        # repeat k/v heads if n_kv_heads < n_heads (GQA)
         keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
         values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
+        # attention
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
         values = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
@@ -272,7 +275,8 @@ class Transformer(nn.Module):
             params.use_scaled_rope,
         )
 
-    def forward(self, tokens: torch.Tensor, start_pos: int):
+    def forward_inference(self, tokens: torch.Tensor, start_pos: int):
+        # for use during inference
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
@@ -296,6 +300,31 @@ class Transformer(nn.Module):
         output = self.output(h).float()
         return output
 
+    def forward_loss(self, inputs: torch.Tensor, targets: torch.Tensor, ignore_index=-100):
+        # for use during training
+        # ignore_index can be set to e.g. self.tokenizer.pad_id in the future
+        # forward the model first
+        _bsz, seqlen = inputs.shape
+        h = self.tok_embeddings(inputs)
+        self.freqs_cis = self.freqs_cis.to(h.device)
+        freqs_cis = self.freqs_cis[:seqlen]
+        mask = torch.full((seqlen, seqlen), float("-inf"), device=inputs.device)
+        mask = torch.triu(mask, diagonal=1)
+        mask = mask.type_as(h)
+        start_pos = -1 # -1 disables KV caching logic
+        for layer in self.layers:
+            h = layer(h, start_pos, freqs_cis, mask)
+        h = self.norm(h)
+        logits = self.output(h).float()
+        # and then loss
+        loss = F.cross_entropy(
+            input=logits.transpose(1, 2),
+            target=targets,
+            reduction="mean",
+            ignore_index=ignore_index,
+        )
+        return loss
+
     def configure_optimizers(self, learning_rate, weight_decay=0.0, betas=(0.9, 0.97), device_type='cuda'):
         # let's only train the RMSNorm parameters to start
         train_params = []
@@ -307,8 +336,6 @@ class Transformer(nn.Module):
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(train_params, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
-
         return optimizer
 # -----------------------------------------------------------------------------
 # Llama wrapper
@@ -366,16 +393,6 @@ class Llama:
         self.model = model
         self.tokenizer = tokenizer
 
-    def forward_and_loss(self, inputs, targets):
-        logits = self.model.forward(inputs, start_pos=0)
-        loss = F.cross_entropy(
-            input=logits.transpose(1, 2),
-            target=targets,
-            reduction="mean",
-            ignore_index=self.tokenizer.pad_id,
-        )
-        return loss
-
     @torch.inference_mode()
     def generate(
         self,
@@ -415,7 +432,7 @@ class Llama:
         input_text_mask = tokens != pad_id
 
         if min_prompt_len == total_len:
-            logits = self.model.forward(tokens, prev_pos)
+            logits = self.model.forward_inference(tokens, prev_pos)
             token_logprobs = -F.cross_entropy(
                 input=logits.transpose(1, 2),
                 target=tokens,
@@ -426,7 +443,7 @@ class Llama:
         stop_tokens = torch.tensor(list(self.tokenizer.stop_tokens))
 
         for cur_pos in range(min_prompt_len, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            logits = self.model.forward_inference(tokens[:, prev_pos:cur_pos], prev_pos)
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -647,11 +664,11 @@ def reference(
 def finetune(
     ckpt_dir: str,
     tokenizer_path: str,
-    temperature: float = 0.6,
+    temperature: float = 1.0,
     top_p: float = 0.9,
-    max_seq_len: int = 128,
-    max_gen_len: int = 64,
-    max_batch_size: int = 4,
+    max_seq_len: int = 256,
+    max_gen_len: int = 256,
+    max_batch_size: int = 16,
 ):
 
     # load the val data shard
@@ -670,20 +687,24 @@ def finetune(
         max_batch_size=max_batch_size,
     )
 
+    total_batch_size = max_batch_size * max_seq_len
+    print(f"total_batch_size: {total_batch_size}")
+
     # super simple training loop to start
-    llama.model.train()
-    optimizer = llama.model.configure_optimizers(learning_rate=1e-4, weight_decay=0.0)
-    for k in range(10):
+    model = llama.model
+    model.train()
+    optimizer = model.configure_optimizers(learning_rate=1e-4, weight_decay=0.0)
+    for step in range(20):
+        optimizer.zero_grad()
         x, y = data_loader.next_batch()
         x, y = x.cuda(), y.cuda()
-        loss = llama.forward_and_loss(x, y)
-        optimizer.zero_grad()
+        loss = model.forward_loss(x, y)
         loss.backward()
         optimizer.step()
-        print(f"step {k}, loss: {loss.item()}")
+        print(f"step {step}, loss: {loss.item()}")
 
     # and now generate
-    llama.model.eval()
+    model.eval()
     prompts: List[str] = [
         "Once upon a time",
         "One day",
@@ -706,5 +727,5 @@ def finetune(
         print("\n==================================\n")
 
 if __name__ == "__main__":
-    # fire.Fire(reference)
-    fire.Fire(finetune)
+    fire.Fire(reference)
+    # fire.Fire(finetune)
