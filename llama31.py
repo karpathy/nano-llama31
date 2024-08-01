@@ -732,25 +732,20 @@ def main(
         cheese =>""",
     ]
 
-    gen = False
-    if gen:
-        t0 = time.time()
-        results = llama.text_completion(
-            prompts,
-            max_gen_len=max_gen_len,
-            temperature=temperature,
-            top_p=top_p,
-        )
-        t1 = time.time()
-        print(f"Generated in {t1 - t0:.2f} seconds")
-        for prompt, result in zip(prompts, results):
-            print(prompt, end="") # AK: change end="\n" to end=""
-            print(f"{result['generation']}")
-            print("\n==================================\n")
-    else:
-        t0 = time.time()
-        tokens = [llama.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
-        llama.train(tokens)
+    gen = True
+    t0 = time.time()
+    results = llama.text_completion(
+        prompts,
+        max_gen_len=max_gen_len,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    t1 = time.time()
+    print(f"Generated in {t1 - t0:.2f} seconds")
+    for prompt, result in zip(prompts, results):
+        print(prompt, end="") # AK: change end="\n" to end=""
+        print(f"{result['generation']}")
+        print("\n==================================\n")
 
 if __name__ == "__main__":
     fire.Fire(main)
