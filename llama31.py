@@ -438,7 +438,6 @@ class Transformer(nn.Module):
         self.n_layers = params.n_layers
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
-
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
@@ -453,7 +452,6 @@ class Transformer(nn.Module):
             params.use_scaled_rope,
         )
 
-    @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
@@ -501,19 +499,15 @@ class Llama:
         assert os.path.isdir(ckpt_dir), f"Checkpoint directory '{ckpt_dir}' does not exist."
         assert os.path.isfile(tokenizer_path), f"Tokenizer file '{tokenizer_path}' does not exist."
 
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        local_rank = 0
         torch.cuda.set_device(local_rank)
-        # seed must be the same in all processes
-        torch.manual_seed(seed)
+        torch.manual_seed(seed) # seed must be the same in all processes
 
         start_time = time.time()
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
         assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
-        assert model_parallel_size == len(
-            checkpoints
-        ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
+        assert model_parallel_size == len(checkpoints)
         ckpt_path = checkpoints[0]
-        # AK: added weights_only=True because I was getting warning
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
@@ -537,6 +531,32 @@ class Llama:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model
         self.tokenizer = tokenizer
+
+    def train(self, tokens: List[List[int]]):
+        params = self.model.params
+        # prepare the tokens tensors
+        bsz = len(tokens)
+        assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
+        max_prompt_len = max(len(t) for t in tokens)
+        assert max_prompt_len <= params.max_seq_len
+        total_len = max_prompt_len
+        pad_id = self.tokenizer.pad_id
+        with torch.no_grad():
+            arr = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+            for k, t in enumerate(tokens):
+                arr[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            inputs = arr[:, :-1]
+            targets = arr[:, 1:]
+        # forward the model
+        logits = self.model.forward(inputs, start_pos=0)
+        # get the loss
+        loss = F.cross_entropy(
+            input=logits.transpose(1, 2),
+            target=targets,
+            reduction="mean",
+            ignore_index=pad_id,
+        )
+        return loss
 
     @torch.inference_mode()
     def generate(
@@ -690,7 +710,8 @@ def main(
     max_gen_len: int = 64,
     max_batch_size: int = 4,
 ):
-    generator = Llama.build(
+
+    llama = Llama.build(
         ckpt_dir=ckpt_dir,
         tokenizer_path=tokenizer_path,
         max_seq_len=max_seq_len,
@@ -710,16 +731,26 @@ def main(
         plush girafe => girafe peluche
         cheese =>""",
     ]
-    results = generator.text_completion(
-        prompts,
-        max_gen_len=max_gen_len,
-        temperature=temperature,
-        top_p=top_p,
-    )
-    for prompt, result in zip(prompts, results):
-        print(prompt, end="") # AK: change end="\n" to end=""
-        print(f"{result['generation']}")
-        print("\n==================================\n")
+
+    gen = False
+    if gen:
+        t0 = time.time()
+        results = llama.text_completion(
+            prompts,
+            max_gen_len=max_gen_len,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        t1 = time.time()
+        print(f"Generated in {t1 - t0:.2f} seconds")
+        for prompt, result in zip(prompts, results):
+            print(prompt, end="") # AK: change end="\n" to end=""
+            print(f"{result['generation']}")
+            print("\n==================================\n")
+    else:
+        t0 = time.time()
+        tokens = [llama.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        llama.train(tokens)
 
 if __name__ == "__main__":
     fire.Fire(main)
