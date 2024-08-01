@@ -43,7 +43,9 @@ And now let's pop up to the root of the repo and run the generation script, whic
 
 ```bash
 cd ../
-python reference.py
+torchrun --nnodes 1 --nproc_per_node 1 reference.py \
+    --ckpt_dir llama-models/models/llama3_1/Meta-Llama-3.1-8B \
+    --tokenizer_path llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model
 ```
 
 It feels a bit sketchy to use this code because the code is marked by Meta as "deprecated" and I don't have full confidence that even this step is actually correct.
@@ -95,6 +97,14 @@ But anyway so this seems to work, even though I'm not 100% confident in it.
 Next I tried to strip the code to its bare essentials into a single file with no dependencies (except pytorch and tiktoken), that should be equivalent translation. For this refer to [llama31.py](llama31.py), which has ~900 lines of code atm.
 
 It seems to work and prints coherent text, but sadly the prints that come out look ok but are definitely not equivalent:
+
+```bash
+python llama31.py \
+    --ckpt_dir llama-models/models/llama3_1/Meta-Llama-3.1-8B \
+    --tokenizer_path llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model
+```
+
+In particular notice the absence of `torchrun`, we get:
 
 ```
 Clearly, the meaning of life is to be found in the life of meaning.
