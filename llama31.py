@@ -14,184 +14,20 @@ python llama31.py \
 """
 
 import os
+import glob
 import fire
 import time
 import json
 import math
 from pathlib import Path
 from dataclasses import dataclass
-from typing import (
-    AbstractSet,
-    cast,
-    Collection,
-    Dict,
-    Iterator,
-    List,
-    Literal,
-    Optional,
-    Sequence,
-    Union,
-    Tuple,
-    TypedDict
-)
+from typing import List, Optional, Tuple, TypedDict
 import torch
 from torch import nn
 import torch.nn.functional as F
-import tiktoken
-from tiktoken.load import load_tiktoken_bpe
+import numpy as np
 
-# -----------------------------------------------------------------------------
-# Tokenizer
-
-# The tiktoken tokenizer can handle <=400k chars without
-# pyo3_runtime.PanicException.
-TIKTOKEN_MAX_ENCODE_CHARS = 400_000
-
-# https://github.com/openai/tiktoken/issues/195
-# Here we iterate over subsequences and split if we exceed the limit
-# of max consecutive non-whitespace or whitespace characters.
-MAX_NO_WHITESPACES_CHARS = 25_000
-
-class Tokenizer:
-    """
-    Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
-    """
-
-    special_tokens: Dict[str, int]
-    num_reserved_special_tokens = 256
-    pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"  # noqa: E501
-
-    def __init__(self, model_path: str):
-        assert os.path.isfile(model_path), model_path
-        mergeable_ranks = load_tiktoken_bpe(model_path)
-        num_base_tokens = len(mergeable_ranks)
-        special_tokens = [
-            "<|begin_of_text|>",
-            "<|end_of_text|>",
-            "<|reserved_special_token_0|>",
-            "<|reserved_special_token_1|>",
-            "<|finetune_right_pad_id|>",
-            "<|step_id|>",
-            "<|start_header_id|>",
-            "<|end_header_id|>",
-            "<|eom_id|>",  # end of message
-            "<|eot_id|>",  # end of turn
-            "<|python_tag|>",
-        ]
-        reserved_tokens = [
-            f"<|reserved_special_token_{2 + i}|>"
-            for i in range(self.num_reserved_special_tokens - len(special_tokens))
-        ]
-        special_tokens = special_tokens + reserved_tokens
-
-        self.special_tokens = {
-            token: num_base_tokens + i for i, token in enumerate(special_tokens)
-        }
-        self.model = tiktoken.Encoding(
-            name=Path(model_path).name,
-            pat_str=self.pat_str,
-            mergeable_ranks=mergeable_ranks,
-            special_tokens=self.special_tokens,
-        )
-
-        self.n_words: int = num_base_tokens + len(special_tokens)
-        self.bos_id: int = self.special_tokens["<|begin_of_text|>"]
-        self.eos_id: int = self.special_tokens["<|end_of_text|>"]
-        self.eot_id: int = self.special_tokens["<|eot_id|>"]
-        self.eom_id: int = self.special_tokens["<|eom_id|>"]
-        self.python_tag_id = self.special_tokens["<|python_tag|>"]
-        self.pad_id: int = self.special_tokens["<|finetune_right_pad_id|>"]
-        self.stop_tokens = [
-            self.special_tokens["<|eom_id|>"],
-            self.special_tokens["<|eot_id|>"],
-        ]
-
-    def encode(
-        self,
-        s: str,
-        *,
-        bos: bool,
-        eos: bool,
-        allowed_special: Optional[Union[Literal["all"], AbstractSet[str]]] = None,
-        disallowed_special: Union[Literal["all"], Collection[str]] = (),
-    ) -> List[int]:
-        """
-        Encodes a string into a list of token IDs.
-
-        Args:
-            s (str): The input string to be encoded.
-            bos (bool): Whether to prepend the beginning-of-sequence token.
-            eos (bool): Whether to append the end-of-sequence token.
-            allowed_tokens ("all"|set[str]): allowed special tokens in string
-            disallowed_tokens ("all"|set[str]): special tokens that raise an error when in string
-
-        Returns:
-            list[int]: A list of token IDs.
-
-        By default, setting disallowed_special=() encodes a string by ignoring
-        special tokens. Specifically:
-        - Setting `disallowed_special` to () will cause all text corresponding
-          to special tokens to be encoded as natural text (insteading of raising
-          an error).
-        - Setting `allowed_special` to "all" will treat all text corresponding
-          to special tokens to be encoded as special tokens.
-        """
-        if allowed_special is None:
-            allowed_special = set()
-        assert type(s) is str
-
-        substrs = (
-            substr
-            for i in range(0, len(s), TIKTOKEN_MAX_ENCODE_CHARS)
-            for substr in self._split_whitespaces_or_nonwhitespaces(
-                s[i : i + TIKTOKEN_MAX_ENCODE_CHARS], MAX_NO_WHITESPACES_CHARS
-            )
-        )
-        t: List[int] = []
-        for substr in substrs:
-            t.extend(
-                self.model.encode(
-                    substr,
-                    allowed_special=allowed_special,
-                    disallowed_special=disallowed_special,
-                )
-            )
-        if bos:
-            t.insert(0, self.bos_id)
-        if eos:
-            t.append(self.eos_id)
-        return t
-
-    def decode(self, t: Sequence[int]) -> str:
-        # Typecast is safe here. Tiktoken doesn't do anything list-related with the sequence.
-        return self.model.decode(cast(List[int], t))
-
-    @staticmethod
-    def _split_whitespaces_or_nonwhitespaces(
-        s: str, max_consecutive_slice_len: int
-    ) -> Iterator[str]:
-        """
-        Splits the string `s` so that each substring contains no more than `max_consecutive_slice_len`
-        consecutive whitespaces or consecutive non-whitespaces.
-        """
-        current_slice_len = 0
-        current_slice_is_space = s[0].isspace() if len(s) > 0 else False
-        slice_start = 0
-
-        for i in range(len(s)):
-            is_now_space = s[i].isspace()
-
-            if current_slice_is_space ^ is_now_space:
-                current_slice_len = 1
-                current_slice_is_space = is_now_space
-            else:
-                current_slice_len += 1
-                if current_slice_len > max_consecutive_slice_len:
-                    yield s[slice_start:i]
-                    slice_start = i
-                    current_slice_len = 1
-        yield s[slice_start:]
-
+from tokenizer import Tokenizer
 # -----------------------------------------------------------------------------
 # ModelArgs
 
@@ -262,9 +98,7 @@ def apply_scaling(freqs: torch.Tensor):
     return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
 
 
-def precompute_freqs_cis(
-    dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False
-):
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
     if use_scaled:
@@ -322,22 +156,8 @@ class Attention(nn.Module):
         self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
-        self.cache_k = torch.zeros(
-            (
-                args.max_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-        self.cache_v = torch.zeros(
-            (
-                args.max_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
+        self.cache_k = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim)).cuda()
+        self.cache_v = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim)).cuda()
 
     def forward(
         self,
@@ -347,32 +167,35 @@ class Attention(nn.Module):
         mask: Optional[torch.Tensor],
     ):
         bsz, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
+        # QKV
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-
+        # rotate QK (rope)
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        # kv-caching (which we can disable by setting start_pos = -1)
+        if start_pos >= 0:
+            self.cache_k = self.cache_k.to(xq)
+            self.cache_v = self.cache_v.to(xq)
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+            keys = self.cache_k[:bsz, : start_pos + seqlen]
+            values = self.cache_v[:bsz, : start_pos + seqlen]
+        else:
+            keys = xk
+            values = xv
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
-
-        # repeat k/v heads if n_kv_heads < n_heads
+        # repeat k/v heads if n_kv_heads < n_heads (GQA)
         keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
         values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
+        # attention
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        values = values.transpose(
-            1, 2
-        )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        values = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
@@ -452,7 +275,8 @@ class Transformer(nn.Module):
             params.use_scaled_rope,
         )
 
-    def forward(self, tokens: torch.Tensor, start_pos: int):
+    def forward_inference(self, tokens: torch.Tensor, start_pos: int):
+        # for use during inference
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
@@ -476,6 +300,43 @@ class Transformer(nn.Module):
         output = self.output(h).float()
         return output
 
+    def forward_loss(self, inputs: torch.Tensor, targets: torch.Tensor, ignore_index=-100):
+        # for use during training
+        # ignore_index can be set to e.g. self.tokenizer.pad_id in the future
+        # forward the model first
+        _bsz, seqlen = inputs.shape
+        h = self.tok_embeddings(inputs)
+        self.freqs_cis = self.freqs_cis.to(h.device)
+        freqs_cis = self.freqs_cis[:seqlen]
+        mask = torch.full((seqlen, seqlen), float("-inf"), device=inputs.device)
+        mask = torch.triu(mask, diagonal=1)
+        mask = mask.type_as(h)
+        start_pos = -1 # -1 disables KV caching logic
+        for layer in self.layers:
+            h = layer(h, start_pos, freqs_cis, mask)
+        h = self.norm(h)
+        logits = self.output(h).float()
+        # and then loss
+        loss = F.cross_entropy(
+            input=logits.transpose(1, 2),
+            target=targets,
+            reduction="mean",
+            ignore_index=ignore_index,
+        )
+        return loss
+
+    def configure_optimizers(self, learning_rate, weight_decay=0.0, betas=(0.9, 0.97), device_type='cuda'):
+        # let's only train the RMSNorm parameters to start
+        train_params = []
+        for name, param in self.named_parameters():
+            if "norm" in name:
+                train_params.append(param)
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = True #'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+        optimizer = torch.optim.AdamW(train_params, lr=learning_rate, betas=betas, **extra_args)
+        return optimizer
 # -----------------------------------------------------------------------------
 # Llama wrapper
 
@@ -532,32 +393,6 @@ class Llama:
         self.model = model
         self.tokenizer = tokenizer
 
-    def train(self, tokens: List[List[int]]):
-        params = self.model.params
-        # prepare the tokens tensors
-        bsz = len(tokens)
-        assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
-        max_prompt_len = max(len(t) for t in tokens)
-        assert max_prompt_len <= params.max_seq_len
-        total_len = max_prompt_len
-        pad_id = self.tokenizer.pad_id
-        with torch.no_grad():
-            arr = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
-            for k, t in enumerate(tokens):
-                arr[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
-            inputs = arr[:, :-1]
-            targets = arr[:, 1:]
-        # forward the model
-        logits = self.model.forward(inputs, start_pos=0)
-        # get the loss
-        loss = F.cross_entropy(
-            input=logits.transpose(1, 2),
-            target=targets,
-            reduction="mean",
-            ignore_index=pad_id,
-        )
-        return loss
-
     @torch.inference_mode()
     def generate(
         self,
@@ -597,7 +432,7 @@ class Llama:
         input_text_mask = tokens != pad_id
 
         if min_prompt_len == total_len:
-            logits = self.model.forward(tokens, prev_pos)
+            logits = self.model.forward_inference(tokens, prev_pos)
             token_logprobs = -F.cross_entropy(
                 input=logits.transpose(1, 2),
                 target=tokens,
@@ -608,7 +443,7 @@ class Llama:
         stop_tokens = torch.tensor(list(self.tokenizer.stop_tokens))
 
         for cur_pos in range(min_prompt_len, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            logits = self.model.forward_inference(tokens[:, prev_pos:cur_pos], prev_pos)
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -699,9 +534,87 @@ def sample_top_p(probs, p):
     return next_token
 
 # -----------------------------------------------------------------------------
-# int main
+# distributed data loader
 
-def main(
+def _peek_data_shard(filename):
+    # only reads the header, returns header data
+    with open(filename, "rb") as f:
+        # first read the header, which is 256 int32 integers (4 bytes each)
+        header = np.frombuffer(f.read(256*4), dtype=np.int32)
+    if header[0] != 20240801:
+        print("ERROR: magic number mismatch in the data .bin file!")
+        exit(1)
+    assert header[1] == 7, "unsupported version"
+    ntok = header[2] # number of tokens (claimed)
+    return ntok # for now just return the number of tokens
+
+def _load_data_shard(filename):
+    with open(filename, "rb") as f:
+        # first read the header, which is 256 int32 integers (4 bytes each)
+        header = np.frombuffer(f.read(256*4), dtype=np.int32)
+        assert header[0] == 20240801, "magic number mismatch in the data .bin file"
+        assert header[1] == 7, "unsupported version"
+        ntok = header[2] # number of tokens (claimed)
+        # the rest of it are tokens, stored as uint16
+        tokens = np.frombuffer(f.read(), dtype=np.uint32)
+    assert len(tokens) == ntok, "number of tokens read does not match header?"
+    return tokens
+
+class DistributedDataLoader:
+    def __init__(self, filename_pattern, B, T, process_rank, num_processes):
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        self.B = B
+        self.T = T
+
+        # glob files that match the pattern
+        self.files = sorted(glob.glob(filename_pattern))
+        assert len(self.files) > 0, f"did not find any files that match the pattern {filename_pattern}"
+
+        # load and validate all data shards, count number of tokens in total
+        ntok_total = 0
+        for fname in self.files:
+            shard_ntok = _peek_data_shard(fname)
+            assert shard_ntok >= num_processes * B * T + 1
+            ntok_total += shard_ntok
+        self.ntok_total = ntok_total
+        print(f"DataLoader: total number of tokens: {ntok_total:,} across {len(self.files)} files")
+
+        # kick things off
+        self.current_shard = None
+        self.reset()
+
+    def reset(self):
+        # we're being a bit clever here: if we already had shard 0 loaded,
+        # then don't do the work to reload it, just reset the pointer
+        if self.current_shard != 0:
+            self.current_shard = 0
+            self.tokens = _load_data_shard(self.files[self.current_shard])
+        self.current_position = self.process_rank * self.B * self.T
+
+    def advance(self): # advance to next data shard
+        self.current_shard = (self.current_shard + 1) % len(self.files)
+        self.current_position = self.process_rank * self.B * self.T
+        self.tokens = _load_data_shard(self.files[self.current_shard])
+
+    def next_batch(self):
+        B = self.B
+        T = self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        buf = torch.tensor(buf, dtype=torch.long)
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the start pointer in current shard
+        self.current_position += B * T * self.num_processes
+        # if loading the next batch would be out of bounds advance the shard
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.advance()
+        return x, y
+
+# -----------------------------------------------------------------------------
+# int mains
+
+def reference(
     ckpt_dir: str,
     tokenizer_path: str,
     temperature: float = 0.6,
@@ -710,6 +623,7 @@ def main(
     max_gen_len: int = 64,
     max_batch_size: int = 4,
 ):
+    # code that just reproduces the reference.py output
 
     llama = Llama.build(
         ckpt_dir=ckpt_dir,
@@ -732,7 +646,71 @@ def main(
         cheese =>""",
     ]
 
-    gen = True
+    t0 = time.time()
+    results = llama.text_completion(
+        prompts,
+        max_gen_len=max_gen_len,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    t1 = time.time()
+    print(f"Generated in {t1 - t0:.2f} seconds")
+    for prompt, result in zip(prompts, results):
+        print(prompt, end="") # AK: change end="\n" to end=""
+        print(f"{result['generation']}")
+        print("\n==================================\n")
+
+def finetune(
+    ckpt_dir: str,
+    tokenizer_path: str,
+    temperature: float = 1.0,
+    top_p: float = 0.9,
+    max_seq_len: int = 256,
+    max_gen_len: int = 256,
+    max_batch_size: int = 16,
+):
+
+    # load the val data shard
+    data_loader = DistributedDataLoader(
+        filename_pattern="tinystories/*_val.bin",
+        B=max_batch_size,
+        T=max_seq_len,
+        process_rank=0,
+        num_processes=1,
+    )
+
+    llama = Llama.build(
+        ckpt_dir=ckpt_dir,
+        tokenizer_path=tokenizer_path,
+        max_seq_len=max_seq_len,
+        max_batch_size=max_batch_size,
+    )
+
+    total_batch_size = max_batch_size * max_seq_len
+    print(f"total_batch_size: {total_batch_size}")
+
+    # super simple training loop to start
+    model = llama.model
+    model.train()
+    optimizer = model.configure_optimizers(learning_rate=1e-4, weight_decay=0.0)
+    for step in range(20):
+        optimizer.zero_grad()
+        x, y = data_loader.next_batch()
+        x, y = x.cuda(), y.cuda()
+        loss = model.forward_loss(x, y)
+        loss.backward()
+        optimizer.step()
+        print(f"step {step}, loss: {loss.item()}")
+
+    # and now generate
+    model.eval()
+    prompts: List[str] = [
+        "Once upon a time",
+        "One day",
+        "Lily and George were best friends",
+        "On a dark and stormy night",
+    ]
+
     t0 = time.time()
     results = llama.text_completion(
         prompts,
@@ -748,4 +726,5 @@ def main(
         print("\n==================================\n")
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    fire.Fire(reference)
+    # fire.Fire(finetune)
