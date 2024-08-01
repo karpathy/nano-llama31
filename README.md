@@ -35,6 +35,7 @@ Don't use a too recent Python (e.g. 3.12) because I think PyTorch support is sti
 
 ```bash
 cd ../../
+echo "fire" >> requirements.txt
 pip install -r requirements.txt
 pip install -e .
 ```
