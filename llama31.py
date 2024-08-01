@@ -52,27 +52,17 @@ TIKTOKEN_MAX_ENCODE_CHARS = 400_000
 # of max consecutive non-whitespace or whitespace characters.
 MAX_NO_WHITESPACES_CHARS = 25_000
 
-
 class Tokenizer:
     """
     Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
     """
 
     special_tokens: Dict[str, int]
-
     num_reserved_special_tokens = 256
-
     pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"  # noqa: E501
 
     def __init__(self, model_path: str):
-        """
-        Initializes the Tokenizer with a Tiktoken model.
-
-        Args:
-            model_path (str): The path to the Tiktoken model file.
-        """
         assert os.path.isfile(model_path), model_path
-
         mergeable_ranks = load_tiktoken_bpe(model_path)
         num_base_tokens = len(mergeable_ranks)
         special_tokens = [
@@ -105,7 +95,6 @@ class Tokenizer:
         )
 
         self.n_words: int = num_base_tokens + len(special_tokens)
-        # BOS / EOS token IDs
         self.bos_id: int = self.special_tokens["<|begin_of_text|>"]
         self.eos_id: int = self.special_tokens["<|end_of_text|>"]
         self.eot_id: int = self.special_tokens["<|eot_id|>"]
@@ -174,15 +163,6 @@ class Tokenizer:
         return t
 
     def decode(self, t: Sequence[int]) -> str:
-        """
-        Decodes a list of token IDs into a string.
-
-        Args:
-            t (List[int]): The list of token IDs to be decoded.
-
-        Returns:
-            str: The decoded string.
-        """
         # Typecast is safe here. Tiktoken doesn't do anything list-related with the sequence.
         return self.model.decode(cast(List[int], t))
 
@@ -326,7 +306,6 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
-
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -451,7 +430,6 @@ class TransformerBlock(nn.Module):
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-
 class Transformer(nn.Module):
     def __init__(self, params: ModelArgs):
         super().__init__()
@@ -485,9 +463,7 @@ class Transformer(nn.Module):
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
-
             mask = torch.triu(mask, diagonal=1)
-
             # When performing key-value caching, we compute the attention scores
             # only for the new sequence. Thus, the matrix of scores is of size
             # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
@@ -511,6 +487,7 @@ class CompletionPrediction(TypedDict, total=False):
     logprobs: List[float]  # not required
 
 class Llama:
+
     @staticmethod
     def build(
         ckpt_dir: str,
@@ -520,35 +497,12 @@ class Llama:
         model_parallel_size: Optional[int] = 1, # AK: changed None -> 1
         seed: int = 1,
     ) -> "Llama":
-        """
-        Build a Llama instance by initializing and loading a model checkpoint.
-
-        Args:
-            ckpt_dir (str): Path to the directory containing checkpoint files.
-            tokenizer_path (str): Path to the tokenizer file.
-            max_seq_len (int): Maximum sequence length for input text.
-            max_batch_size (int): Maximum batch size for inference.
-            model_parallel_size (Optional[int], optional): Number of model parallel processes.
-                If not provided, it's determined from the environment. Defaults to None.
-
-        Returns:
-            Llama: An instance of the Llama class with the loaded model and tokenizer.
-
-        Raises:
-            AssertionError: If there are no checkpoint files in the specified directory,
-                or if the model parallel size does not match the number of checkpoint files.
-
-        Note:
-            This method initializes the distributed process group, sets the device to CUDA,
-            and loads the pre-trained model and tokenizer.
-        """
         assert 1 <= max_seq_len <= 8192, f"max_seq_len must be between 1 and 8192, got {max_seq_len}."
         assert os.path.isdir(ckpt_dir), f"Checkpoint directory '{ckpt_dir}' does not exist."
         assert os.path.isfile(tokenizer_path), f"Tokenizer file '{tokenizer_path}' does not exist."
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
-
         # seed must be the same in all processes
         torch.manual_seed(seed)
 
@@ -578,7 +532,6 @@ class Llama:
         model = Transformer(model_args)
         model.load_state_dict(checkpoint, strict=False)
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
-
         return Llama(model, tokenizer)
 
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
@@ -596,23 +549,12 @@ class Llama:
         echo: bool = False,
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
         """
-        Generate text sequences based on provided prompts using the language generation model.
-
-        Args:
-            prompt_tokens (List[List[int]]): List of tokenized prompts, where each prompt is represented as a list of integers.
-            max_gen_len (int): Maximum length of the generated text sequence.
-            temperature (float, optional): Temperature value for controlling randomness in sampling. Defaults to 0.6.
-            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 0.9.
-            logprobs (bool, optional): Flag indicating whether to compute token log probabilities. Defaults to False.
-            echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
-
-        Returns:
-            Tuple[List[List[int]], Optional[List[List[float]]]]: A tuple containing generated token sequences and, if logprobs is True, corresponding token log probabilities.
-
-        Note:
-            This method uses the provided prompts as a basis for generating text. It employs nucleus sampling to produce text with controlled randomness.
-            If logprobs is True, token log probabilities are computed for each generated token.
-
+        prompt_tokens (List[List[int]]): List of tokenized prompts, where each prompt is represented as a list of integers.
+        max_gen_len (int): Maximum length of the generated text sequence.
+        temperature (float, optional): Temperature value for controlling randomness in sampling. Defaults to 0.6.
+        top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 0.9.
+        logprobs (bool, optional): Flag indicating whether to compute token log probabilities. Defaults to False.
+        echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
         """
         params = self.model.params
         bsz = len(prompt_tokens)
@@ -704,26 +646,6 @@ class Llama:
         logprobs: bool = False,
         echo: bool = False,
     ) -> List[CompletionPrediction]:
-        """
-        Perform text completion for a list of prompts using the language generation model.
-
-        Args:
-            prompts (List[str]): List of text prompts for completion.
-            temperature (float, optional): Temperature value for controlling randomness in sampling. Defaults to 0.6.
-            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 0.9.
-            max_gen_len (Optional[int], optional): Maximum length of the generated completion sequence.
-                If not provided, it's set to the model's maximum sequence length minus 1.
-            logprobs (bool, optional): Flag indicating whether to compute token log probabilities. Defaults to False.
-            echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
-
-        Returns:
-            List[CompletionPrediction]: List of completion predictions, each containing the generated text completion.
-
-        Note:
-            This method generates text completions for the provided prompts, employing nucleus sampling to introduce controlled randomness.
-            If logprobs is True, token log probabilities are computed for each generated token.
-
-        """
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
@@ -747,20 +669,6 @@ class Llama:
         return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
 
 def sample_top_p(probs, p):
-    """
-    Perform top-p (nucleus) sampling on a probability distribution.
-
-    Args:
-        probs (torch.Tensor): Probability distribution tensor.
-        p (float): Probability threshold for top-p sampling.
-
-    Returns:
-        torch.Tensor: Sampled token indices.
-
-    Note:
-        Top-p sampling selects the smallest set of tokens whose cumulative probability mass
-        exceeds the threshold p. The distribution is renormalized based on the selected tokens.
-    """
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > p
@@ -782,13 +690,6 @@ def main(
     max_gen_len: int = 64,
     max_batch_size: int = 4,
 ):
-    """
-    Examples to run with the pre-trained models (no fine-tuning). Prompts are
-    usually in the form of an incomplete text prefix that the model can then try to complete.
-
-    The context window of llama3 models is 8192 tokens, so `max_seq_len` needs to be <= 8192.
-    `max_gen_len` is needed because pre-trained models usually do not stop completions naturally.
-    """
     generator = Llama.build(
         ckpt_dir=ckpt_dir,
         tokenizer_path=tokenizer_path,
@@ -796,7 +697,6 @@ def main(
         max_batch_size=max_batch_size,
     )
 
-    # AK: fixed a trailing whitespace bug and adjusted the prompts a bit
     prompts: List[str] = [
         # For these prompts, the expected answer is the natural continuation of the prompt
         "Clearly, the meaning of life is",
