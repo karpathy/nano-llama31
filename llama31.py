@@ -366,16 +366,13 @@ class Llama:
         self.model = model
         self.tokenizer = tokenizer
 
-    def forward(self, inputs, targets):
-        pad_id = self.tokenizer.pad_id
-        # forward the model
+    def forward_and_loss(self, inputs, targets):
         logits = self.model.forward(inputs, start_pos=0)
-        # get the loss
         loss = F.cross_entropy(
             input=logits.transpose(1, 2),
             target=targets,
             reduction="mean",
-            ignore_index=pad_id,
+            ignore_index=self.tokenizer.pad_id,
         )
         return loss
 
@@ -598,9 +595,56 @@ class DistributedDataLoader:
         return x, y
 
 # -----------------------------------------------------------------------------
-# int main
+# int mains
 
-def main(
+def reference(
+    ckpt_dir: str,
+    tokenizer_path: str,
+    temperature: float = 0.6,
+    top_p: float = 0.9,
+    max_seq_len: int = 128,
+    max_gen_len: int = 64,
+    max_batch_size: int = 4,
+):
+    # code that just reproduces the reference.py output
+
+    llama = Llama.build(
+        ckpt_dir=ckpt_dir,
+        tokenizer_path=tokenizer_path,
+        max_seq_len=max_seq_len,
+        max_batch_size=max_batch_size,
+    )
+
+    prompts: List[str] = [
+        # For these prompts, the expected answer is the natural continuation of the prompt
+        "Clearly, the meaning of life is",
+        "Simply put, the theory of relativity states that",
+        """The repo llm.c on GitHub is""",
+        # Few shot prompt (providing a few examples before asking model to complete more);
+        """Translate English to French:
+
+        sea otter => loutre de mer
+        peppermint => menthe poivrée
+        plush girafe => girafe peluche
+        cheese =>""",
+    ]
+
+    gen = True
+    t0 = time.time()
+    results = llama.text_completion(
+        prompts,
+        max_gen_len=max_gen_len,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    t1 = time.time()
+    print(f"Generated in {t1 - t0:.2f} seconds")
+    for prompt, result in zip(prompts, results):
+        print(prompt, end="") # AK: change end="\n" to end=""
+        print(f"{result['generation']}")
+        print("\n==================================\n")
+
+def finetune(
     ckpt_dir: str,
     tokenizer_path: str,
     temperature: float = 0.6,
@@ -631,7 +675,8 @@ def main(
     optimizer = llama.model.configure_optimizers(learning_rate=1e-4, weight_decay=0.0)
     for k in range(10):
         x, y = data_loader.next_batch()
-        loss = llama.forward(x, y)
+        x, y = x.cuda(), y.cuda()
+        loss = llama.forward_and_loss(x, y)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -661,4 +706,5 @@ def main(
         print("\n==================================\n")
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    # fire.Fire(reference)
+    fire.Fire(finetune)
