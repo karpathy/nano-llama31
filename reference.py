@@ -137,6 +137,7 @@ class Llama:
     def generate(
         self,
         prompt_tokens: List[List[int]],
+        sample_rng: torch.Generator,
         max_gen_len: int,
         temperature: float = 0.6,
         top_p: float = 0.9,
@@ -197,7 +198,7 @@ class Llama:
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
-                next_token = sample_top_p(probs, top_p)
+                next_token = sample_top_p(probs, top_p, generator=sample_rng)
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
 
@@ -246,6 +247,7 @@ class Llama:
     def text_completion(
         self,
         prompts: List[str],
+        sample_rng: torch.Generator,
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
@@ -277,6 +279,7 @@ class Llama:
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
         generation_tokens, generation_logprobs = self.generate(
             prompt_tokens=prompt_tokens,
+            sample_rng=sample_rng,
             max_gen_len=max_gen_len,
             temperature=temperature,
             top_p=top_p,
@@ -294,7 +297,7 @@ class Llama:
             ]
         return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
 
-def sample_top_p(probs, p):
+def sample_top_p(probs, p, generator):
     """
     Perform top-p (nucleus) sampling on a probability distribution.
 
@@ -314,7 +317,7 @@ def sample_top_p(probs, p):
     mask = probs_sum - probs_sort > p
     probs_sort[mask] = 0.0
     probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
-    next_token = torch.multinomial(probs_sort, num_samples=1)
+    next_token = torch.multinomial(probs_sort, num_samples=1, generator=generator)
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
 
@@ -356,8 +359,11 @@ def main(
         plush girafe => girafe peluche
         cheese =>""",
     ]
+    sample_rng = torch.Generator(device='cuda')
+    sample_rng.manual_seed(1337)
     results = generator.text_completion(
         prompts,
+        sample_rng=sample_rng,
         max_gen_len=max_gen_len,
         temperature=temperature,
         top_p=top_p,

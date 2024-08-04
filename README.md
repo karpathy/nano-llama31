@@ -1,12 +1,14 @@
 # nano-llama31
 
-In this repo we're just trying to forward Llama 3.1, with minimal dependencies (in preperation of some llm.c work). In particular, current code runs inference on the 8B base model on a single (40GB+) GPU in a single file of ~900 lines of just PyTorch and tiktoken. Coming up interested in making this smaller, add finetuning.
+This repo is to Llama 3.1 what nanoGPT is to GPT-2. i.e. it is a minimal, dependency-free implementation of the Llama 3.1 architecture, and it can train, finetune, and inference it very simply. This is compared to the official code release from Meta and the huggingface implementation, which both feature heavier dependencies and a lot more code (e.g. fair).
 
-**WIP.**, not ready for prime time.
+The code currently focuses on the 8B base model of Llama 3.1.
+
+**WIP.**, actively developed, not ready for prime time.
 
 ### The reference
 
-Let's begin with the official Llama 3.1 code release from Meta, which should be our reference. Doing this appears to be surprisingly difficult because Meta's official repo [does not seem to](https://github.com/meta-llama/llama-models/issues/82) include documentation or instructions on how to actually use the models once you download them. But ok let's try:
+Let's begin with the official Llama 3.1 code release from Meta, which acts as our reference. This turns out to not be trivial because Meta's official repo [does not seem to](https://github.com/meta-llama/llama-models/issues/82) include documentation or instructions on how to actually use the models once you download them. But let's try:
 
 Download the official `llama-models` repo, e.g. inside this project's directory is ok:
 
@@ -49,24 +51,21 @@ torchrun --nnodes 1 --nproc_per_node 1 reference.py \
     --tokenizer_path llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model
 ```
 
-It feels a bit sketchy to use this code because the code is marked by Meta as "deprecated" and I don't have full confidence that even this step is actually correct.
+It feels a bit sketchy to use this code because the code is marked by Meta as "deprecated". So I don't currently have full confidence that this (deprecated) Llama 3.0 code is correct to use with the Llama 3.1 model.
 
-But this does print some completions that look good:
+But using the 3.0 code with the 3.1 model does print completions that look good:
 
 ```
-Clearly, the meaning of life is to be found in the actions and events of everyday life. And that is why it is so important to live a meaningful life, and why it is so important to create a meaningful life. It is not enough to be a good person and to do good things. We must also create meaning in our lives by engaging in
+Clearly, the meaning of life is to be found in the joy of living, in the joy of love, in the joy of work. The meaning of life is to be found in the joy of overcoming the self. The meaning of life is to be found in the joy of listening to music, in the joy of painting, in the joy of writing
 
 ==================================
 
-Simply put, the theory of relativity states that the laws of physics are the same everywhere in the universe. This means that the laws of physics, such as the speed of light, are the same no matter where you are in the universe. In other words, if you were to measure the speed of light in one part of the universe, you would get the same
+Simply put, the theory of relativity states that the laws of physics are the same for all non-accelerating observers, and the speed of light in a vacuum is the same for all observers, regardless of the source of the light. In addition, the theory of relativity states that the speed of light within a vacuum is the same for all observers, regardless
 
 ==================================
 
-The repo llm.c on GitHub is a collection of implementations of language models, including GPT-2, GPT-3, and BERT. It is used by researchers and developers to experiment with different language models and their applications.
-
-## Installation
-
-To use the repo llm.c, you need to have a C++ compiler installed on your system.
+The repo llm.c on GitHub is a collection of code for the LL.M. in Law, Technology, and Entrepreneurship at NYU Law. It includes a variety of projects and assignments that students can work on to enhance their skills and knowledge in the field of law, technology, and entrepreneurship.
+The repo contains a variety of projects and assignments that students can
 
 ==================================
 
@@ -76,28 +75,27 @@ Translate English to French:
         peppermint => menthe poivrée
         plush girafe => girafe peluche
         cheese => fromage
-        cheetah => guépard
-        tiger => tigre
-        lion => lion
+        rose => rose
+        bumblebee => bourdon
+        fox => renard
+        whale => baleine
         elephant => éléphant
-        giraffe => girafe
-        kangaroo => kangourou
-        zebra => zèbre
-        penguin => manchot
-        monkey
+        pineapple => ananas
+        coffee => café
+        cat => chat
+        dog => chien
+        panda => panda
+
 
 ==================================
 ```
 
 By the way I noticed that the official Meta code of [example_text_completion.py](https://github.com/meta-llama/llama3/blob/main/example_text_completion.py) has the notorious trailing whitespace bug (see how the prompts end with whitespace, e.g. *"Simply put, the theory of relativity states that "* this is bad because tokenization), I fixed this in our code.
 
-But anyway so this seems to work, even though I'm not 100% confident in it.
 
 ### Stripping torchrun/fairscale
 
-Next I tried to strip the code to its bare essentials into a single file with no dependencies (except pytorch and tiktoken), that should be equivalent translation. For this refer to [llama31.py](llama31.py), which has ~900 lines of code atm.
-
-It seems to work and prints coherent text, but sadly the prints that come out look ok but are definitely not equivalent:
+Now that we have inference results from a reference that we have high confidence in (because it uses a lot of official Meta code verbatim), we can build our own smaller, cleaner, more explicit version as long as we make sure that its output matches the reference. For this , refer to [llama31.py](llama31.py), which has ~800 lines of code atm. Run it as:
 
 ```bash
 python llama31.py \
@@ -105,55 +103,17 @@ python llama31.py \
     --tokenizer_path llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model
 ```
 
-In particular notice the absence of `torchrun`, we get:
-
-```
-Clearly, the meaning of life is to be found in the life of meaning.
-There is no such thing as a life without meaning. The meaning of life is to be found in the life of meaning. The meaning of life is to be found in the life of meaning.
-The meaning of life is to be found in the life of meaning. The meaning
-
-==================================
-
-Simply put, the theory of relativity states that the laws of physics are the same for all non-accelerating observers, and the speed of light in a vacuum is the same for all observers, regardless of their relative motion or of the motion of the source of the light. The theory of relativity applies to all observers in uniform motion and is the consequence of
-
-==================================
-
-The repo llm.c on GitHub is a repo that provides a set of resources for learning and exploring the topic of large language models (LLMs). The repo contains a variety of materials, including tutorials, code examples, and datasets, that can be used to learn about LLMs and their applications.
-One of the key features of the repo is the tutorials
-
-==================================
-
-Translate English to French:
-
-        sea otter => loutre de mer
-        peppermint => menthe poivrée
-        plush girafe => girafe peluche
-        cheese => fromage
-        basset hound => barbet
-        poodle => caniche
-        chocolate labrador => labrador chocolat
-        golden retriever => retriever jaune
-        pitbull => pitbull
-        pug => pug
-        chihuahua => chihuahua
-
-
-==================================
-```
-
-I suspect this is because of PyTorch global use of random seed, and PyTorch layers like nn.Embedding and nn.Linear consume entropy from the (global) rng. While the reference code uses `init_method` of `lambda x: x`, i.e. a noop, not initializing, and therefore not consuming entropy. TODO chase down later.
+In particular notice the absence of `torchrun`. You'll see that this prints the identical same result as the reference code above, giving us confidence that this single file of PyTorch is a bug-free adaptation.
 
 ### finetuning
 
-Early draft of finetuning exists on Tiny Stories dataset, requires hacking the code to call `finetune` instead of `reference`. Requires quite a bit of VRAM atm, e.g. only training the RMSNorm still takes up a good chunk of my 80GB GPU.
+Early draft of finetuning exists on Tiny Stories dataset. It currently requires hacking the code to call `finetune` instead of `reference` at the very end of file. Requires quite a bit of VRAM atm, e.g. only training the RMSNorm still takes up a good chunk of my 80GB GPU.
 
 ### todos
 
 TODOs:
 
-- get reference.py and llama31.py outputs to match exactly
 - delete more bloat and make nicer, I just hacked this together quickly
-- training/finetuning (e.g. have to delete a bunch of inference_mode() s)
-- think through the Chat model not just Base model
-- think through Llama 3 models > 8B in size (?)
-- change the code to become something like train_gpt2.py reference in llm.c repo
+- make full featured, more similar to nanoGPT (mixed precision, DDP, bells and whistles etc.)
+- add support for Chat model inference and finetuning, not just Base model
+- think through support for Llama 3 models > 8B in size
