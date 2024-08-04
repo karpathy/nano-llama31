@@ -537,7 +537,7 @@ def sample_top_p(probs, p, generator):
     return next_token
 
 # -----------------------------------------------------------------------------
-# distributed data loader
+# distributed and sharded data loader
 
 def _peek_data_shard(filename):
     # only reads the header, returns header data
@@ -563,7 +563,15 @@ def _load_data_shard(filename):
     assert len(tokens) == ntok, "number of tokens read does not match header?"
     return tokens
 
-class DistributedDataLoader:
+class DistributedShardedDataLoader:
+    """
+    This DataLoader is both:
+    - distributed (works correctly in case of multiple processes in DDP)
+    - sharded (supports datasets that are broken up into multiple data shards)
+    It is not *permuted*, meaning that it itearates over the data in the order
+    of the dataset on disk, so the user should make sure to shuffle their examples
+    during the creation of their data shards for best performance.
+    """
     def __init__(self, filename_pattern, B, T, process_rank, num_processes):
         self.process_rank = process_rank
         self.num_processes = num_processes
@@ -677,7 +685,7 @@ def finetune(
 ):
 
     # load the val data shard
-    data_loader = DistributedDataLoader(
+    data_loader = DistributedShardedDataLoader(
         filename_pattern="tinystories/*_val.bin",
         B=max_batch_size,
         T=max_seq_len,
