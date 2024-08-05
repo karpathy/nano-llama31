@@ -46,6 +46,7 @@ class ModelArgs:
     use_scaled_rope: bool = False
     max_batch_size: int = 32
     max_seq_len: int = 2048
+    flash: bool = False # use flash attention?
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
@@ -152,8 +153,11 @@ class Attention(nn.Module):
         self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
+        # TODO: only use cache on demand, and do lazy init to save memory
         self.cache_k = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim)).cuda()
         self.cache_v = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim)).cuda()
+
+        self.flash = args.flash # use flash attention?
 
     def forward(
         self,
@@ -192,11 +196,16 @@ class Attention(nn.Module):
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
         values = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+
+        if self.flash:
+            output = F.scaled_dot_product_attention(xq, keys, values, mask)
+        else:
+            scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if mask is not None:
+                scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
 
@@ -322,11 +331,38 @@ class Transformer(nn.Module):
         return loss
 
     def configure_optimizers(self, learning_rate, weight_decay=0.0, betas=(0.9, 0.97), device_type='cuda'):
-        # let's only train the RMSNorm parameters to start
         train_params = []
-        for name, param in self.named_parameters():
-            if "norm" in name:
+
+        finetune_type = "all"
+        if finetune_type == "rmsnorm":
+            # let's only train the RMSNorm parameters to start
+            for name, param in self.named_parameters():
+                if "norm" in name:
+                    train_params.append(param)
+        elif finetune_type == "all":
+            # let's train all parameters
+            for param in self.parameters():
                 train_params.append(param)
+        elif finetune_type == "all_no_pos":
+            # let's train all parameters except the positional embeddings and lm_head
+            n, m = 0, 0
+            for name, param in self.named_parameters():
+                if name == "output.weight":
+                    # do not include
+                    n += 1
+                    continue
+                elif name == "tok_embeddings.weight":
+                    # do not include and also does not require grad
+                    m += 1
+                    param.requires_grad = False
+                else:
+                    # do include
+                    train_params.append(param)
+            assert n == 1, "did not find output.weight"
+            assert m == 1, "did not find tok_embeddings.weight"
+
+        print("number of parameters: ", sum(p.numel() for p in self.parameters()))
+        print("number of trainable parameters: ", sum(p.numel() for p in train_params))
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = True #'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
@@ -345,7 +381,8 @@ class Llama:
         tokenizer_path: str,
         max_seq_len: int,
         max_batch_size: int,
-        model_parallel_size: Optional[int] = 1, # AK: changed None -> 1
+        flash: bool = False,
+        model_parallel_size: Optional[int] = 1,
         seed: int = 1,
     ) -> "Llama":
         assert 1 <= max_seq_len <= 8192, f"max_seq_len must be between 1 and 8192, got {max_seq_len}."
@@ -368,6 +405,7 @@ class Llama:
         model_args: ModelArgs = ModelArgs(
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
+            flash=flash,
             **params,
         )
         tokenizer = Tokenizer(model_path=tokenizer_path)
@@ -594,7 +632,8 @@ def main(
     top_p: float = 0.9,
     max_seq_len: int = 256,
     max_gen_len: int = 256,
-    max_batch_size: int = 16,
+    max_batch_size: int = 8,
+    flash: bool = True,
 ):
 
     # load the val data shard
@@ -611,6 +650,7 @@ def main(
         tokenizer_path=tokenizer_path,
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
+        flash=flash,
     )
 
     total_batch_size = max_batch_size * max_seq_len
@@ -619,7 +659,7 @@ def main(
     # super simple training loop to start
     model = llama.model
     model.train()
-    optimizer = model.configure_optimizers(learning_rate=1e-3, weight_decay=0.0)
+    optimizer = model.configure_optimizers(learning_rate=1e-5, weight_decay=0.0)
     for step in range(20):
         optimizer.zero_grad()
         x, y = data_loader.next_batch()
