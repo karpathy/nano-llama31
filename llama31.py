@@ -398,7 +398,6 @@ class Llama:
         max_gen_len: int,
         temperature: float = 0.6,
         top_p: float = 0.9,
-        logprobs: bool = False,
         echo: bool = False,
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
         """
@@ -422,8 +421,6 @@ class Llama:
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
-        if logprobs:
-            token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
         prev_pos = 0
         eos_reached = torch.tensor([False] * bsz, device="cuda")
@@ -431,12 +428,6 @@ class Llama:
 
         if min_prompt_len == total_len:
             logits = self.model.forward_inference(tokens, prev_pos)
-            token_logprobs = -F.cross_entropy(
-                input=logits.transpose(1, 2),
-                target=tokens,
-                reduction="none",
-                ignore_index=pad_id,
-            )
 
         stop_tokens = torch.tensor(list(self.tokenizer.stop_tokens))
 
@@ -454,13 +445,6 @@ class Llama:
                 input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
             )
             tokens[:, cur_pos] = next_token
-            if logprobs:
-                token_logprobs[:, prev_pos + 1 : cur_pos + 1] = -F.cross_entropy(
-                    input=logits.transpose(1, 2),
-                    target=tokens[:, prev_pos + 1 : cur_pos + 1],
-                    reduction="none",
-                    ignore_index=pad_id,
-                )
             eos_reached |= (~input_text_mask[:, cur_pos]) & (
                 torch.isin(next_token, stop_tokens)
             )
@@ -468,27 +452,20 @@ class Llama:
             if all(eos_reached):
                 break
 
-        if logprobs:
-            token_logprobs = token_logprobs.tolist()
-        out_tokens, out_logprobs = [], []
+        out_tokens = []
         for i, toks in enumerate(tokens.tolist()):
             # cut to max gen len
             start = 0 if echo else len(prompt_tokens[i])
             toks = toks[start : len(prompt_tokens[i]) + max_gen_len]
-            probs = None
-            if logprobs:
-                probs = token_logprobs[i][start : len(prompt_tokens[i]) + max_gen_len]
             # cut to after eos tok if any
             for stop_token in self.tokenizer.stop_tokens:
                 try:
                     eos_idx = toks.index(stop_token)
                     toks = toks[:eos_idx]
-                    probs = probs[:eos_idx] if logprobs else None
                 except ValueError:
                     pass
             out_tokens.append(toks)
-            out_logprobs.append(probs)
-        return (out_tokens, out_logprobs if logprobs else None)
+        return out_tokens
 
     def text_completion(
         self,
@@ -497,30 +474,19 @@ class Llama:
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
-        logprobs: bool = False,
         echo: bool = False,
     ) -> List[CompletionPrediction]:
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
-        generation_tokens, generation_logprobs = self.generate(
+        generation_tokens = self.generate(
             prompt_tokens=prompt_tokens,
             sample_rng=sample_rng,
             max_gen_len=max_gen_len,
             temperature=temperature,
             top_p=top_p,
-            logprobs=logprobs,
             echo=echo,
         )
-        if logprobs:
-            return [
-                {
-                    "generation": self.tokenizer.decode(t),
-                    "tokens": [self.tokenizer.decode([x]) for x in t],
-                    "logprobs": logprobs_i,
-                }
-                for t, logprobs_i in zip(generation_tokens, generation_logprobs)
-            ]
         return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
 
 def sample_top_p(probs, p, generator):
