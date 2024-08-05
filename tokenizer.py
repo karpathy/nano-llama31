@@ -27,9 +27,7 @@ TIKTOKEN_MAX_ENCODE_CHARS = 400_000
 MAX_NO_WHITESPACES_CHARS = 25_000
 
 class Tokenizer:
-    """
-    Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
-    """
+    """ Converts List[int] <-> str """
 
     special_tokens: Dict[str, int]
     num_reserved_special_tokens = 256
@@ -76,8 +74,10 @@ class Tokenizer:
         self.python_tag_id = self.special_tokens["<|python_tag|>"]
         self.pad_id: int = self.special_tokens["<|finetune_right_pad_id|>"]
         self.stop_tokens = [
-            self.special_tokens["<|eom_id|>"],
-            self.special_tokens["<|eot_id|>"],
+            # AK: I changed the tokens around here to be for the base model
+            # as I understand the sequence is <BOS>content<EOS><BOS>content<EOS>...
+            self.special_tokens["<|begin_of_text|>"],
+            self.special_tokens["<|end_of_text|>"],
         ]
 
     def encode(

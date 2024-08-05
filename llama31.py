@@ -337,11 +337,6 @@ class Transformer(nn.Module):
 # -----------------------------------------------------------------------------
 # Llama wrapper
 
-class CompletionPrediction(TypedDict, total=False):
-    generation: str
-    tokens: List[str]  # not required
-    logprobs: List[float]  # not required
-
 class Llama:
 
     @staticmethod
@@ -475,10 +470,12 @@ class Llama:
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
         echo: bool = False,
-    ) -> List[CompletionPrediction]:
+    ):
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
+        # encode the (string) prompts to tokens
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        # generate the completions in tokens space
         generation_tokens = self.generate(
             prompt_tokens=prompt_tokens,
             sample_rng=sample_rng,
@@ -487,7 +484,9 @@ class Llama:
             top_p=top_p,
             echo=echo,
         )
-        return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
+        # decode the completions back to strings
+        completions = [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
+        return completions
 
 def sample_top_p(probs, p, generator):
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
