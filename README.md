@@ -95,25 +95,26 @@ By the way I noticed that the official Meta code of [example_text_completion.py]
 
 ### Stripping torchrun/fairscale
 
-Now that we have inference results from a reference that we have high confidence in (because it uses a lot of official Meta code verbatim), we can build our own smaller, cleaner, more explicit version as long as we make sure that its output matches the reference. For this , refer to [llama31.py](llama31.py), which has ~800 lines of code atm. Run it as:
+Now that we have inference results from a reference that we have high confidence in (because it uses a lot of official Meta code verbatim), we can build our own smaller, cleaner, more explicit version as long as we make sure that its output matches the reference. For this, refer to [llama31.py](llama31.py), which has ~700 lines of code atm. This file contains the main code, but it is tested from the file [test_llama31.py](test_llama31.py), which is configured to reproduce exactly the reference output. Run it simply as:
+
+Run it as:
 
 ```bash
-python llama31.py \
-    --ckpt_dir llama-models/models/llama3_1/Meta-Llama-3.1-8B \
-    --tokenizer_path llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model
+python test_llama31.py
 ```
 
 In particular notice the absence of `torchrun`. You'll see that this prints the identical same result as the reference code above, giving us confidence that this single file of PyTorch is a bug-free adaptation.
 
 ### finetuning
 
-Early draft of finetuning exists on Tiny Stories dataset. It currently requires hacking the code to call `finetune` instead of `reference` at the very end of file. Requires quite a bit of VRAM atm, e.g. only training the RMSNorm still takes up a good chunk of my 80GB GPU.
+Early draft of finetuning exists on Tiny Stories dataset, and this is what the main entry point of [llama31.py](llama31.py) is configured to run right now. It requires quite a bit of VRAM atm, e.g. only training the RMSNorm still takes up a good chunk of my 80GB GPU.
 
 ### todos
 
 TODOs:
 
-- delete more bloat and make nicer, I just hacked this together quickly
-- make full featured, more similar to nanoGPT (mixed precision, DDP, bells and whistles etc.)
+- delete more bloat, make nicer
+- make finetuning more full featured, more similar to nanoGPT (mixed precision, DDP, bells and whistles etc.)
 - add support for Chat model inference and finetuning, not just Base model
 - think through support for Llama 3 models > 8B in size
+- resolve the printed warning about deprecated set_default_tensor_type

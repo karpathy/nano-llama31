@@ -28,6 +28,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from tokenizer import Tokenizer
+
 # -----------------------------------------------------------------------------
 # ModelArgs
 
@@ -72,14 +73,12 @@ class RMSNorm(torch.nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
-
 def apply_scaling(freqs: torch.Tensor):
-    # Values obtained from grid search
+    # RoPE scaling (values obtained from grid search)
     scale_factor = 8
     low_freq_factor = 1
     high_freq_factor = 4
     old_context_len = 8192  # original llama3 length
-
     low_freq_wavelen = old_context_len / low_freq_factor
     high_freq_wavelen = old_context_len / high_freq_factor
     new_freqs = []
@@ -97,7 +96,6 @@ def apply_scaling(freqs: torch.Tensor):
             new_freqs.append((1 - smooth) * freq / scale_factor + smooth * freq)
     return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
 
-
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
@@ -107,14 +105,12 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, use_scaled:
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
 
-
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
-
 
 def apply_rotary_emb(
     xq: torch.Tensor,
@@ -337,6 +333,7 @@ class Transformer(nn.Module):
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(train_params, lr=learning_rate, betas=betas, **extra_args)
         return optimizer
+
 # -----------------------------------------------------------------------------
 # Llama wrapper
 
@@ -623,58 +620,9 @@ class DistributedShardedDataLoader:
         return x, y
 
 # -----------------------------------------------------------------------------
-# int mains
+# int main
 
-def reference(
-    ckpt_dir: str = "llama-models/models/llama3_1/Meta-Llama-3.1-8B",
-    tokenizer_path: str = "llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model",
-    temperature: float = 0.6,
-    top_p: float = 0.9,
-    max_seq_len: int = 128,
-    max_gen_len: int = 64,
-    max_batch_size: int = 4,
-):
-    # code that just reproduces the reference.py output
-
-    llama = Llama.build(
-        ckpt_dir=ckpt_dir,
-        tokenizer_path=tokenizer_path,
-        max_seq_len=max_seq_len,
-        max_batch_size=max_batch_size,
-    )
-
-    prompts: List[str] = [
-        # For these prompts, the expected answer is the natural continuation of the prompt
-        "Clearly, the meaning of life is",
-        "Simply put, the theory of relativity states that",
-        """The repo llm.c on GitHub is""",
-        # Few shot prompt (providing a few examples before asking model to complete more);
-        """Translate English to French:
-
-        sea otter => loutre de mer
-        peppermint => menthe poivrée
-        plush girafe => girafe peluche
-        cheese =>""",
-    ]
-
-    sample_rng = torch.Generator(device='cuda')
-    sample_rng.manual_seed(1337)
-    t0 = time.time()
-    results = llama.text_completion(
-        prompts,
-        sample_rng=sample_rng,
-        max_gen_len=max_gen_len,
-        temperature=temperature,
-        top_p=top_p,
-    )
-    t1 = time.time()
-    print(f"Generated in {t1 - t0:.2f} seconds")
-    for prompt, result in zip(prompts, results):
-        print(prompt, end="") # AK: change end="\n" to end=""
-        print(f"{result['generation']}")
-        print("\n==================================\n")
-
-def finetune(
+def main(
     ckpt_dir: str = "llama-models/models/llama3_1/Meta-Llama-3.1-8B",
     tokenizer_path: str = "llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model",
     temperature: float = 1.0,
@@ -706,7 +654,7 @@ def finetune(
     # super simple training loop to start
     model = llama.model
     model.train()
-    optimizer = model.configure_optimizers(learning_rate=1e-4, weight_decay=0.0)
+    optimizer = model.configure_optimizers(learning_rate=1e-3, weight_decay=0.0)
     for step in range(20):
         optimizer.zero_grad()
         x, y = data_loader.next_batch()
@@ -743,5 +691,4 @@ def finetune(
         print("\n==================================\n")
 
 if __name__ == "__main__":
-    fire.Fire(reference)
-    # fire.Fire(finetune)
+    fire.Fire(main)
