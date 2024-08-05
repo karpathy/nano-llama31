@@ -118,3 +118,5 @@ TODOs:
 - add support for Chat model inference and finetuning, not just Base model
 - think through support for Llama 3 models > 8B in size
 - resolve the printed warning about deprecated set_default_tensor_type
+- finetuning is still broken: we have to correctly not attend past BOS tokens because this is how Llama 3 was trained. We have to do this by carefully setting the mask in the attention layer. This is not yet done.
+- KV cache should only be used in inference, not in training. We're wasting memory initializing it and keeping it around.
