@@ -325,10 +325,10 @@ def sample_top_p(probs, p, generator):
 def main(
     ckpt_dir: str,
     tokenizer_path: str,
-    temperature: float = 0.6,
+    temperature: float = 0.0, # note: doing argmax decoding
     top_p: float = 0.9,
     max_seq_len: int = 128,
-    max_gen_len: int = 64,
+    max_gen_len: int = 32,
     max_batch_size: int = 4,
 ):
     """

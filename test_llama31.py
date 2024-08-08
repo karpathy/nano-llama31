@@ -12,10 +12,10 @@ from llama31 import Llama
 def test_inference(
     ckpt_dir: str = "llama-models/models/llama3_1/Meta-Llama-3.1-8B",
     tokenizer_path: str = "llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model",
-    temperature: float = 0.6,
+    temperature: float = 0.0, # note: doing argmax decoding
     top_p: float = 0.9,
     max_seq_len: int = 128,
-    max_gen_len: int = 64,
+    max_gen_len: int = 32,
 ):
 
     prompts = [
@@ -32,6 +32,19 @@ def test_inference(
         cheese =>""",
     ]
     max_batch_size = len(prompts) # 4
+
+    # we get this from running reference.py
+    expected_completions = [
+        " to be found in the pursuit of happiness. But what is happiness? Is it the same as pleasure? Is it the same as contentment? Is it the",
+        " the laws of physics are the same for all non-accelerating observers, and the speed of light in a vacuum is the same for all observers, regardless",
+        " a collection of code snippets and examples for using the Large Language Model (LLM) in various applications. The repo is maintained by a community of developers and researchers",
+        """ fromage
+        cheese => fromage
+        cheese => fromage
+        cheese => fromage
+        cheese => fromage
+        cheese => fromage"""
+    ]
 
     # init the model
     llama = Llama.build(
@@ -60,6 +73,16 @@ def test_inference(
         print(prompt, end="")
         print(f"{result['generation']}")
         print("\n==================================\n")
+
+    # check if the results match the expected outputs
+    for result, expected in zip(results, expected_completions):
+        ok = result["generation"] == expected
+        if ok:
+            print("OK")
+        else:
+            print("FAIL")
+            print(f"Expected: {expected}")
+            print(f"Got: {result['generation']}")
 
 if __name__ == "__main__":
     fire.Fire(test_inference)
