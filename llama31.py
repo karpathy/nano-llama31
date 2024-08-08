@@ -138,9 +138,25 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
+class KVCache(nn.Module):
+    def __init__(self, batch_size, seq_length, n_kv_heads, head_dim, dtype, device):
+        super().__init__()
+        cache_shape = (batch_size, seq_length, n_kv_heads, head_dim)
+        self.register_buffer("cache_k", torch.zeros(cache_shape, dtype=dtype, device=device))
+        self.register_buffer("cache_v", torch.zeros(cache_shape, dtype=dtype, device=device))
+
+    def update(self, start_pos, xk, xv):
+        seqlen = xk.size(1)
+        self.cache_k[:, start_pos : start_pos + seqlen] = xk
+        self.cache_v[:, start_pos : start_pos + seqlen] = xv
+        xk = self.cache_k[:, : start_pos + seqlen]
+        xv = self.cache_v[:, : start_pos + seqlen]
+        return xk, xv
+
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
+        self.flash = args.flash # use flash attention?
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         # model_parallel_size = fs_init.get_model_parallel_world_size()
         model_parallel_size = 1 # AK: model parallel size is 1 for 1 GPU
@@ -154,11 +170,8 @@ class Attention(nn.Module):
         self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
-        # TODO: only use cache on demand, and do lazy init to save memory
-        self.cache_k = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim)).cuda()
-        self.cache_v = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim)).cuda()
-
-        self.flash = args.flash # use flash attention?
+        # will be KVCache object managed by inference context manager
+        self.cache = None
 
     def forward(
         self,
@@ -168,7 +181,7 @@ class Attention(nn.Module):
         mask: Optional[torch.Tensor],
     ):
         bsz, seqlen, _ = x.shape
-        # calculate querky, key, value and split out heads
+        # calculate query, key, value and split out heads
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
@@ -176,14 +189,10 @@ class Attention(nn.Module):
         # rotate query, keys (RoPE)
         xq = apply_rotary_emb(xq, freqs_cis)
         xk = apply_rotary_emb(xk, freqs_cis)
-        # kv-caching (which we can disable by setting start_pos = -1)
-        if start_pos >= 0:
-            self.cache_k = self.cache_k.to(xq)
-            self.cache_v = self.cache_v.to(xq)
-            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-            xk = self.cache_k[:bsz, : start_pos + seqlen]
-            xv = self.cache_v[:bsz, : start_pos + seqlen]
+        # KV cache update
+        if self.cache is not None:
+            # update the KV cache with current KV and get all the previous KVs
+            xk, xv = self.cache.update(start_pos, xk, xv)
         # repeat k/v heads if n_kv_heads < n_heads (GQA)
         xk = repeat_kv(xk, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
         xv = repeat_kv(xv, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
@@ -443,6 +452,19 @@ class Llama:
         assert max_prompt_len <= params.max_seq_len
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
+        # install KV cache in all the Attention layers
+        for block in self.model.layers:
+            layer_dtype = block.attention.wq.weight.dtype
+            layer_device = block.attention.wq.weight.device
+            block.attention.cache = KVCache(
+                batch_size=bsz,
+                seq_length=total_len,
+                n_kv_heads=params.n_kv_heads,
+                head_dim=params.dim // params.n_heads,
+                dtype=layer_dtype,
+                device=layer_device,
+            )
+
         pad_id = self.tokenizer.pad_id
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
         for k, t in enumerate(prompt_tokens):
@@ -458,13 +480,14 @@ class Llama:
         stop_tokens = torch.tensor(list(self.tokenizer.stop_tokens))
 
         for cur_pos in range(min_prompt_len, total_len):
+            # get the logits for the next token in all the batch rows
             logits = self.model.forward_inference(tokens[:, prev_pos:cur_pos], prev_pos)
+            # sample the next token
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p, sample_rng)
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
-
             next_token = next_token.reshape(-1)
             # only replace token if prompt has already been generated
             next_token = torch.where(
@@ -491,6 +514,11 @@ class Llama:
                 except ValueError:
                     pass
             out_tokens.append(toks)
+
+        # clean up the KV cache in all the layers
+        for block in self.model.layers:
+            block.attention.cache = None
+
         return out_tokens
 
     def text_completion(
