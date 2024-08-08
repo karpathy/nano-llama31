@@ -98,7 +98,12 @@ def download():
     #     data = json.load(f)
     # print(f"Example story:\n{data[0]}")
 
-def process_shard(shard_index, shard_filename):
+def process_shard(shard_index, shard_filename, tokenizer_path):
+    # create tokenizer and encode function within the process
+    tokenizer = Tokenizer(tokenizer_path)
+    def encode(x):
+        return tokenizer.encode(x, bos=True, eos=True)
+
     with open(shard_filename, "r") as f:
         data = json.load(f)
     rng = random.Random(1337 + shard_index)
@@ -111,7 +116,7 @@ def process_shard(shard_index, shard_filename):
         all_tokens.extend(tokens)
     return all_tokens
 
-def tokenize():
+def tokenize(tokenizer_path):
     # shard 0 will be the val split, rest is train
     data_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
     shard_filenames = sorted(glob.glob(os.path.join(data_dir, "*.json")))
@@ -122,7 +127,7 @@ def tokenize():
         print(f"Tokenizing {split_name} split...")
         all_tokens = []
         with ProcessPoolExecutor() as executor:
-            futures = [executor.submit(process_shard, shard_index, shard_filename)
+            futures = [executor.submit(process_shard, shard_index, shard_filename, tokenizer_path)
                        for shard_index, shard_filename in enumerate(split_shards)]
             for future in as_completed(futures):
                 all_tokens.extend(future.result())
@@ -134,7 +139,6 @@ def tokenize():
 
 if __name__ == "__main__":
     DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "tinystories")
-    tokenizer = Tokenizer("llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model")
-    encode = lambda x: tokenizer.encode(x, bos=True, eos=True)
+    tokenizer_path = "llama-models/models/llama3_1/Meta-Llama-3.1-8B/tokenizer.model"
     download()
-    tokenize()
+    tokenize(tokenizer_path)
