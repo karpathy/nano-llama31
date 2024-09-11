@@ -579,7 +579,7 @@ def _load_data_shard(filename):
         assert header[0] == 20240801, "magic number mismatch in the data .bin file"
         assert header[1] == 7, "unsupported version"
         ntok = header[2] # number of tokens (claimed)
-        # the rest of it are tokens, stored as uint16
+        # the rest of it are tokens, stored as uint32
         tokens = np.frombuffer(f.read(), dtype=np.uint32)
     assert len(tokens) == ntok, "number of tokens read does not match header?"
     return tokens
