@@ -1,0 +1,6 @@
+.DS_Store
+.idea
+.ipynb_checkpoints/
+.vscode
+__pycache__/
+llama-models/
